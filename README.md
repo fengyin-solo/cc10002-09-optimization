@@ -34,6 +34,26 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 健康检查：`curl http://127.0.0.1:8000/api/health`
 
+#### 连接诊断与输入源准入
+
+“建立连接”不是改状态标记，而是一次可核对的只读连接诊断，数据源页面与 ETL 输入源准入共用同一份结论：
+
+- `POST /api/datasource/{id}/diagnose`：对当前配置依次执行 **地址格式 → 握手 → 认证 → 读取探针** 四个只读阶段，返回逐阶段成败、失败阶段、尝试次数与共享预算；并发同配置请求只发出一次探测（单飞合并）。
+- `POST /api/datasource/{id}/diagnose/cancel`：只取消当前等待者，不影响同配置其他调用所需的探测。
+- `PATCH /api/datasource/{id}`：修改配置；认证方式、接入地址、查询超时、重试或凭据变化后，历史诊断立即标记过期，不能再作为准入依据。认证凭据只存进程内保险库，任何响应都不回显。
+- `GET /api/datasource/{id}/diagnoses`：查看该配置的历史诊断记录。
+- `POST /api/etljob/{id}/input-check`：只核对不启动，逐条说明每个输入源采用哪次诊断、为何可用或不可用；未绑定的自由文字输入源仅展示，不猜测绑定。
+- `POST /api/etljob/{id}/actions`（启动任务）：先过输入源准入，拒绝时保留明确依据，不能用上次成功遮住本次失败。
+
+一次诊断的所有步骤与重试共用同一个截止预算（`查询超时秒数 × (重试上限 + 1)`），每个阶段只拿到剩余预算；探测由固定大小的 FIFO 工作线程池消费，数据源各自的“连接池大小”是该配置的在探名额上限，超时后立即释放名额。
+
+本地端点验证（正常 / 延迟 / 拒绝认证）：
+
+```bash
+python3 tools/probe_server.py 18080   # 提供 /healthy /slow /secure /boom
+cd backend && .venv/bin/python -m unittest discover -s tests -v
+```
+
 ### 前端
 
 ```bash

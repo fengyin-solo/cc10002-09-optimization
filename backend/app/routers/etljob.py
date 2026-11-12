@@ -1,16 +1,14 @@
-"""ETL任务接口：维护加工任务，覆盖提交调度、启动任务、终止任务、归档结果等动作。"""
+"""ETL任务接口：维护加工任务，并在启动前对输入源做连接诊断准入核对。"""
 from __future__ import annotations
 
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from app.schemas import ActionResult, EntryPayload, PageResult
-from app.services.etljob import EtljobService
+from app.schemas import ActionResult, AdmissionResult, EntryPayload, PageResult
+from app.services.etljob import START_ACTION, service
 
 router = APIRouter(prefix="/api/etljob", tags=["ETL任务"])
-
-service = EtljobService()
 
 LIST_FIELDS = ["任务编号", "输入源", "输出目标", "转换脚本", "依赖任务", "调度表达式", "数据分区", "失败重试次数"]
 STATUSES = ["草稿", "待调度", "运行中", "已完成", "已失败"]
@@ -30,9 +28,16 @@ def list_entries(
     return PageResult(items=items, total=total, page=page, size=size)
 
 
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出ETL任务清单：返回当前过滤条件下的全量数据。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "etljob", "total": total, "items": items}
+
+
 @router.get("/{entry_id}", response_model=dict)
 def get_entry(entry_id: int) -> dict:
-    """读取单条加工任务明细；不存在时给出可读的错误说明。"""
+    """读取单条加工任务明细（含输入源准入记录）；不存在时给出可读说明。"""
     entry = service.get_entry(entry_id)
     if entry is None:
         raise HTTPException(status_code=404, detail=f"加工任务 {entry_id} 不存在或已归档")
@@ -48,18 +53,40 @@ def create_entry(payload: EntryPayload) -> ActionResult:
     return ActionResult(ok=True, message="加工任务已登记", entry=entry)
 
 
+@router.post("/{entry_id}/input-check", response_model=AdmissionResult)
+def check_inputs(entry_id: int) -> AdmissionResult:
+    """只核对、不启动：逐条说明每个输入源采用哪次诊断、为何可用或不可用。"""
+    try:
+        report = service.check_inputs(entry_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return AdmissionResult(**report)
+
+
 @router.post("/{entry_id}/actions", response_model=ActionResult)
 def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
-    """对单条加工任务执行提交调度、启动任务、终止任务、归档结果；不允许的动作会被拦下并说明原因。"""
+    """执行任务动作；“启动任务”先过输入源准入，拒绝时保留明确依据，不用上次成功遮本次失败。"""
     action = str(payload.values.get("action") or "").strip()
-    entry, message = service.run_action(entry_id, action)
+    report = None
+    if action == START_ACTION:
+        try:
+            report = service.check_inputs(entry_id)
+        except KeyError as exc:
+            return ActionResult(ok=False, message=str(exc))
+        if not report["允许启动"]:
+            reasons = "；".join(
+                item["结论"] for item in report["输入源检查"] if item["判定"] != "准入通过"
+            )
+            return ActionResult(
+                ok=False,
+                message=f"输入源准入未通过，任务未启动：{reasons}",
+                entry=service.get_entry(entry_id),
+                detail={"准入编号": report["准入编号"], "输入源检查": report["输入源检查"]},
+            )
+    entry, message = service.run_action(entry_id, action, admission_report=report)
     if entry is None:
         return ActionResult(ok=False, message=message)
-    return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出ETL任务清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "etljob", "total": total, "items": items}
+    detail = None
+    if action == START_ACTION:
+        detail = {"准入编号": report["准入编号"], "输入源检查": report["输入源检查"]}
+    return ActionResult(ok=True, message=message, entry=entry, detail=detail)

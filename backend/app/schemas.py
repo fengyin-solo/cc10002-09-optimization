@@ -19,6 +19,19 @@ class ActionResult(BaseModel):
     ok: bool
     message: str
     entry: dict[str, Any] | None = None
+    # 动作附带的结构化结论（如连接诊断的分阶段结果、等待者编号）。
+    detail: dict[str, Any] | None = None
+
+
+class AdmissionResult(BaseModel):
+    """ETL 输入源准入核对结果。"""
+
+    准入编号: str
+    加工任务ID: int
+    检查时间: str
+    允许启动: bool
+    输入源检查: list[dict[str, Any]]
+    说明: str
 
 
 class EntryPayload(BaseModel):
